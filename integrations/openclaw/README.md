@@ -53,13 +53,14 @@ After installing, run the setup command to configure Cognee as the memory provid
 # Cognee only (replaces built-in memory)
 openclaw cognee setup
 
-# Or keep built-in memory alongside Cognee
+# Or keep built-in memory enabled in config
 openclaw cognee setup --hybrid
 ```
 
 **Default mode** disables built-in memory providers — all recall comes from Cognee.
 
-**Hybrid mode** keeps `memory-core` enabled — the agent uses both Cognee recall and built-in memory search.
+**Hybrid mode** keeps `memory-core` enabled in config, but on OpenClaw versions with exclusive memory slots only the slot winner loads at runtime.
+This plugin registers its own memory flush plan, so pre-compaction flush works when Cognee owns the memory slot.
 
 Then configure the Cognee connection in `~/.openclaw/openclaw.json`:
 
@@ -259,7 +260,7 @@ Note: Files are stored in Cognee using sanitized relative paths as filenames (e.
 ```bash
 # Configure Cognee as the memory provider (run once after install)
 openclaw cognee setup              # Cognee only
-openclaw cognee setup --hybrid     # Cognee + built-in memory
+openclaw cognee setup --hybrid     # Keep built-ins enabled in config (runtime co-load depends on slot rules)
 
 # Manually sync memory files to Cognee
 openclaw cognee index

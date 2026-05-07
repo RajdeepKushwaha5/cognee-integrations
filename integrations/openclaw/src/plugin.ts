@@ -293,8 +293,8 @@ const memoryCogneePlugin = {
 
       cognee
         .command("setup")
-        .description("Configure OpenClaw to use Cognee for memory (default: replaces built-in, --hybrid: alongside built-in)")
-        .option("--hybrid", "Keep built-in memory providers enabled alongside Cognee")
+        .description("Configure OpenClaw to use Cognee for memory (default: disables built-ins, --hybrid: keep built-ins enabled in config)")
+        .option("--hybrid", "Keep built-in memory providers enabled in config (slot exclusivity may still prevent co-loading)")
         .action(async (opts: { hybrid?: boolean }) => {
           const { loadConfig, writeConfigFile } = api.runtime.config;
           const config = loadConfig();
@@ -326,8 +326,8 @@ const memoryCogneePlugin = {
           if (opts.hybrid) {
             console.log("Cognee memory setup complete (hybrid mode):");
             console.log("  - Memory slot set to cognee-openclaw");
-            console.log("  - memory-core enabled (built-in memory active)");
-            console.log("\nBoth Cognee recall and built-in memory search are active.");
+            console.log("  - memory-core enabled in config");
+            console.log("\nNote: if your OpenClaw version enforces exclusive memory slots, only the slot winner loads at runtime.");
           } else {
             console.log("Cognee memory setup complete:");
             console.log("  - Memory slot set to cognee-openclaw");
