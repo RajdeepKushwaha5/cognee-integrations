@@ -10,10 +10,9 @@ OpenClaw plugin that adds Cognee-backed memory with **multi-scope support** (com
 - **Session tracking**: Multi-turn conversation context via Cognee's session system
 - **14 search types**: From simple semantic search (CHUNKS) to chain-of-thought graph reasoning (GRAPH_COMPLETION_COT) to auto-selection (FEELING_LUCKY)
 - **Health check**: Verifies Cognee API connectivity before operations
-- **Auto-index**: Syncs memory markdown files to Cognee (add new, update changed, delete removed, skip unchanged)
-- **Memify support**: Optional graph enrichment after cognify for better entity consolidation
+- **Auto-index**: Syncs memory markdown files to Cognee via `/remember` (add new, update changed, forget removed, skip unchanged). The `/remember` endpoint runs ingest, graph build, and graph enrichment in one server-side call.
 - **One-command setup**: `openclaw cognee setup` configures Cognee as the sole memory provider
-- **CLI commands**: `openclaw cognee setup`, `openclaw cognee index`, `openclaw cognee status`, `openclaw cognee health`, `openclaw cognee scopes`
+- **CLI commands**: `openclaw cognee setup`, `openclaw cognee index`, `openclaw cognee status`, `openclaw cognee health`, `openclaw cognee scopes`, `openclaw cognee forget`
 
 ## Security: Recommended Plugin Allowlist
 
@@ -54,13 +53,14 @@ After installing, run the setup command to configure Cognee as the memory provid
 # Cognee only (replaces built-in memory)
 openclaw cognee setup
 
-# Or keep built-in memory alongside Cognee
+# Or keep built-in memory enabled in config
 openclaw cognee setup --hybrid
 ```
 
 **Default mode** disables built-in memory providers — all recall comes from Cognee.
 
-**Hybrid mode** keeps `memory-core` enabled — the agent uses both Cognee recall and built-in memory search.
+**Hybrid mode** keeps `memory-core` enabled in config, but on OpenClaw versions with exclusive memory slots only the slot winner loads at runtime.
+This plugin registers its own memory flush plan, so pre-compaction flush works when Cognee owns the memory slot.
 
 Then configure the Cognee connection in `~/.openclaw/openclaw.json`:
 
@@ -69,11 +69,15 @@ plugins:
   entries:
     cognee-openclaw:
       enabled: true
+      hooks:
+        allowConversationAccess: true   # see note below
       config:
         baseUrl: "http://localhost:8000"
         apiKey: "${COGNEE_API_KEY}"
         datasetName: "my-project"
 ```
+
+> `hooks.allowConversationAccess` -> OpenClaw ≥ 2026.4.27 blocks non-bundled plugins from registering the `agent_end` hook unless this flag is set. Without it, file sync memory operations after each agent turn is silently disabled. The gateway still loads the plugin, but file changes the agent makes won't reach Cognee until the next manual `openclaw cognee index` or gateway start. Restart the gateway after adding the flag: `openclaw gateway stop && openclaw gateway start`.
 
 ### Cognee Cloud
 
@@ -98,9 +102,9 @@ export COGNEE_BASE_URL=https://tenant-xxx.cloud.cognee.ai/api
 export COGNEE_API_KEY=your-api-key
 ```
 
-**Cloud mode supported operations**: add (new files), search, cognify, delete.
+**Cloud mode supported operations**: `remember` (new files), `recall`, per-item `forget`. The `/remember` and `/recall` endpoints are verified against self-hosted Cognee 1.0.3; cloud parity for these specific routes has not been validated yet — file an issue if you hit a 404.
 
-**Known limitation**: Updating existing data (modifying a previously synced file) is not yet supported in cloud mode. Cognee Cloud silently ignores re-adds with the same filename. To update data, delete and re-add it manually via the [Cognee Cloud platform](https://platform.cognee.ai) or the API directly. This will be supported in a future version.
+**Known limitation**: Updating existing data (modifying a previously synced file) is not supported in cloud mode — `PATCH /update` is self-hosted only. In cloud mode the plugin's update path is a no-op; to edit a single file in place, delete it and re-add it via the [Cognee Cloud platform](https://platform.cognee.ai) or the API directly.
 
 ## Multi-Scope Memory
 
@@ -211,10 +215,10 @@ This lets the agent distinguish between personal context, shared knowledge, and 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `searchType` | string | `GRAPH_COMPLETION` | Search strategy (see below) |
-| `maxResults` | number | `3` | Max memories to inject per scope |
+| `maxResults` | number | `3` | Max memories to inject per scope (sent as `top_k` to Cognee) |
 | `minScore` | number | `0.3` | Minimum relevance score filter |
-| `maxTokens` | number | `512` | Token cap for recall context per scope |
 | `searchPrompt` | string | `""` | System prompt to guide search |
+| ~~`maxTokens`~~ | number | `512` | **Deprecated** — Cognee 1.0.3's recall payload no longer accepts a token cap; use `maxResults` instead. Setting this is silently ignored. |
 
 ### Search Types
 
@@ -241,10 +245,10 @@ This lets the agent distinguish between personal context, shared knowledge, and 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `autoRecall` | boolean | `true` | Inject memories before agent runs |
-| `autoIndex` | boolean | `true` | Sync memory files on startup and after agent runs |
-| `autoCognify` | boolean | `true` | Run cognify after new memories are added |
-| `autoMemify` | boolean | `false` | Run memify (graph enrichment) after cognify |
-| `deleteMode` | string | `soft` | `soft` removes raw data, `hard` also removes graph nodes |
+| `autoIndex` | boolean | `true` | Sync memory files on startup, after agent runs, and on session end |
+| ~~`autoCognify`~~ | boolean | `true` | **Deprecated** — `/remember` runs the cognify step server-side. Setting this is silently ignored. |
+| ~~`autoMemify`~~ | boolean | `false` | **Deprecated** — graph enrichment now runs server-side via `/remember`'s `self_improvement` default. Setting this is silently ignored. |
+| ~~`deleteMode`~~ | string | `soft` | **Deprecated** — `/forget` always runs the equivalent of `soft`; the legacy `hard` mode is gone (cognee's source explicitly warns against it). Setting this is silently ignored. |
 
 ### Timeouts
 
@@ -260,7 +264,7 @@ Note: Files are stored in Cognee using sanitized relative paths as filenames (e.
 ```bash
 # Configure Cognee as the memory provider (run once after install)
 openclaw cognee setup              # Cognee only
-openclaw cognee setup --hybrid     # Cognee + built-in memory
+openclaw cognee setup --hybrid     # Keep built-ins enabled in config (runtime co-load depends on slot rules)
 
 # Manually sync memory files to Cognee
 openclaw cognee index
@@ -273,14 +277,19 @@ openclaw cognee health
 
 # Show memory scope routing for current workspace files
 openclaw cognee scopes
+
+# Wipe a dataset, or all of this user's data, from Cognee
+openclaw cognee forget --dataset <name>
+openclaw cognee forget --everything --confirm
 ```
 
 ## How It Works
 
-1. **On startup**: Health check, then scan `memory/` directory and sync files to scope-specific Cognee datasets
-2. **Before agent start**: Search each configured scope in parallel, merge results with scope labels, inject as `<cognee_memories>` context
-3. **After agent end**: Re-scan memory files and sync any changes (including deletions) to the correct scope datasets
-4. **State tracking**:
+1. **On startup**: Health check, then scan `memory/` directory and call `/api/v1/remember` (one batched multipart upload per scope). Cognee runs add + cognify + improve server-side.
+2. **Before each prompt**: Call `/api/v1/recall` for each configured scope in parallel, merge results with scope labels, inject as `<cognee_memories>` context.
+3. **After each agent run**: Re-scan memory files; new files batch into a `/remember` call, changed files go through `PATCH /api/v1/update` (self-hosted) or fall through to `/remember` if update returns "not found", removed files are dropped via `POST /api/v1/forget`.
+4. **On session end**: One final sync pass to catch any edits that didn't fire `agent_end` (failed runs, manual edits between turns).
+5. **State tracking**:
    - `~/.openclaw/memory/cognee/datasets.json` — dataset ID mapping
    - `~/.openclaw/memory/cognee/scoped-sync-indexes.json` — per-scope file hashes and data IDs
    - `~/.openclaw/memory/cognee/sync-index.json` — legacy single-scope index
