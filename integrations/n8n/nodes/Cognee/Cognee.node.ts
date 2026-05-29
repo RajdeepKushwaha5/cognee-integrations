@@ -271,7 +271,7 @@ export class Cognee implements INodeType {
         displayName: 'Run in Background',
         name: 'runInBackground',
         type: 'boolean',
-        default: true,
+        default: false,
         description:
           'Whether to run cognify asynchronously on the Cognee Cloud API. When enabled, the request returns immediately with pipeline metadata (including pipeline_run_id) and processing continues server-side; poll GET /api/v1/datasets/status to track completion. Disable to wait synchronously, but note that the Cognee Cloud gateway closes long-running connections around the 4-minute mark, so non-trivial datasets will fail with ECONNRESET in sync mode.',
         displayOptions: {
