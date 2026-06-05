@@ -1,13 +1,17 @@
 from . import bootstrap
 from .tools import (
-    add_tool,
-    get_sessionized_cognee_tools,
-    search_tool,
+    cognee_tools,
+    recall,
+    remember,
+    render_results,
+    run_cognee_task,
 )
 
 __all__ = [
-    "add_tool",
-    "search_tool",
+    "remember",
+    "recall",
+    "render_results",
+    "cognee_tools",
+    "run_cognee_task",
     "bootstrap",
-    "get_sessionized_cognee_tools",
 ]

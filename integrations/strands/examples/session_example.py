@@ -1,99 +1,80 @@
-import asyncio
+"""Session memory vs permanent memory with cognee + Strands.
+
+Agent A (no session) writes to the permanent graph; Agent B (session_id, with
+self_improvement=False) writes to the session cache, which stays invisible to
+graph search until cognee.improve() persists it.
+
+Run this example from the root (needs LLM_API_KEY in .env):
+
+    uv run python integrations/strands/examples/session_example.py
+"""
+
 import os
-import webbrowser
 
 import cognee
-from cognee_integration_strands import get_sessionized_cognee_tools
-from cognee_integration_strands.tools import run_cognee_task
+from cognee.api.v1.config import config
+from cognee.api.v1.visualize import visualize_multi_user_graph
+from cognee.modules.users.methods import get_default_user
+from cognee_integration_strands import cognee_tools, run_cognee_task
 from dotenv import load_dotenv
 from strands import Agent
 from strands.models.openai import OpenAIModel
 
 load_dotenv()
 
-
-async def visualize_graph(file_name, open_browser=True):
-    current_file_dir = os.path.dirname(os.path.abspath(__file__))
-    destination_file_path = os.path.join(current_file_dir, file_name)
-
-    # Run visualization in the background task runner for consistency
-    run_cognee_task(cognee.visualize_graph(destination_file_path))
-
-    if open_browser:
-        url = "file://" + os.path.abspath(destination_file_path)
-        webbrowser.open(url)
+SESSION_ID = "mission-briefing"
+_COGNEE_DIR = os.path.join(os.path.dirname(__file__), "../.cognee")
 
 
-async def main():
-    from cognee.api.v1.config import config
+def visualize(file_name):
+    async def _viz():
+        user = await get_default_user()
+        pairs = [(user, ds) for ds in await cognee.datasets.list_datasets(user=user)]
+        path = os.path.join(_COGNEE_DIR, file_name)
+        await visualize_multi_user_graph(pairs, destination_file_path=path)
+        return path
 
-    config.data_root_directory(os.path.join(os.path.dirname(__file__), "../.cognee/data_storage"))
+    print("   graph ->", run_cognee_task(_viz()))
 
-    config.system_root_directory(os.path.join(os.path.dirname(__file__), "../.cognee/system"))
 
-    async def setup_cognee():
-        await cognee.prune.prune_data()
-        await cognee.prune.prune_system(metadata=True)
+def main():
+    config.data_root_directory(os.path.join(_COGNEE_DIR, "data"))
+    config.system_root_directory(os.path.join(_COGNEE_DIR, "system"))
+    run_cognee_task(cognee.forget(everything=True))
 
-    # Run setup in the background task runner
-    run_cognee_task(setup_cognee())
+    model = OpenAIModel(client_args={"api_key": os.getenv("LLM_API_KEY")}, model_id="gpt-4o")
 
-    """
-        Do a research on the following topic: "What contracts are in the healthcare industy?"
-    """
+    # No session -> permanent graph.
+    permanent_tools = cognee_tools()
+    # session_id + self_improvement=False -> writes stay in the cache until improve().
+    session_tools = cognee_tools(session_id=SESSION_ID, remember_kwargs={"self_improvement": False})
 
-    add_tool, search_tool = get_sessionized_cognee_tools("a-sample-session-id")
+    def ask(tools, prompt):
+        # Fresh agent each call so answers come from cognee's memory, not chat history.
+        return Agent(model=model, tools=tools)(prompt)
 
-    # Configure the model
-    model = OpenAIModel(
-        client_args={"api_key": os.getenv("LLM_API_KEY")},
-        model_id="gpt-4o",
+    question = "What is the renewed 2026 value of the Orion Retail Group contract?"
+
+    print("1) Agent A remembers a baseline fact -> permanent graph")
+    ask(permanent_tools, 'Remember: "Orion Retail Group" — retail industry, contract worth £850K.')
+    visualize("session_before_improve.html")
+
+    print("2) Agent B remembers a renewal -> session cache only")
+    ask(
+        session_tools,
+        "Remember: the Orion Retail Group contract was renewed for 3 years at £2.0M for 2026.",
     )
 
-    # A fresh agent instance, unaware of what is in the memory
-    agent = Agent(
-        model=model,
-        tools=[add_tool, search_tool],
-    )
+    print("3) Agent A asks before improve() -> still the old value")
+    print(ask(permanent_tools, question))
 
-    fresh_agent = Agent(
-        model=model,
-        tools=[add_tool, search_tool],
-    )
+    print(f"4) Persist the session cache: improve(session_ids=[{SESSION_ID!r}])")
+    run_cognee_task(cognee.improve(session_ids=[SESSION_ID]))
 
-    # Feed data to the agent
-    messages = [
-        'We have signed a contract with the following company: "Guardian Insurance Ltd". '
-        "Company is in the insurance industry. Start date is Feb 2023 and "
-        "end date is Feb 2026. Contract value is £1.8M.",
-        'We have signed a contract with the following company: "Pioneer Assurance Group". '
-        "Company is in the insurance industry. Start date is Oct 2024 and "
-        "end date is Oct 2029. Contract value is £4.2M.",
-        'We have signed a contract with the following company: "Finovate Systems". '
-        "Company is in the fintech industry. Start date is May 2024 and "
-        "end date is May 2027. Contract value is £2.3M.",
-    ]
-
-    for msg in messages:
-        response = agent(msg)
-        print("\n\n")
-        print(f"Processed: {msg[:50]}...")
-
-    print("\n=== AGENT RESPONSE (Ingestion) ===")
-    print("Data ingestion completed via individual calls.")
-
-    print("\n=== SEARCHING ===")
-    response = fresh_agent(
-        "I need to research our contract portfolio. Can you search for any contracts we have "
-        "with companies in the insurance industry? Please use the search functionality to "
-        "find this information."
-    )
-
-    print("\n=== AGENT RESPONSE ===")
-    print(response)
-
-    await visualize_graph(file_name="session_example.html")
+    print("5) Agent A asks again -> now the renewed value")
+    print(ask(permanent_tools, question))
+    visualize("session_after_improve.html")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

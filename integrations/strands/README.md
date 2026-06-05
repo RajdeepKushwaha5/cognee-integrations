@@ -6,15 +6,29 @@ A powerful integration between Cognee and Strands that provides intelligent know
 
 ## Overview
 
-`cognee-integration-strands` combines Cognee's advanced knowledge storage and retrieval system with Strands' agent framework. This integration allows you to build AI agents that can efficiently store, search, and retrieve information from a persistent knowledge base using Cognee's graph-based storage.
+`cognee-integration-strands` combines [Cognee's memory layer](https://github.com/topoteretes/cognee) with the [Strands Agents](https://github.com/strands-agents/harness-sdk) framework. Build agents that store, search, and recall information from a persistent knowledge graph — plus a fast session cache.
 
 ## Features
 
-- **Smart Knowledge Storage**: Add and persist information using Cognee's advanced indexing.
-- **Semantic Search**: Retrieve relevant information using natural language queries.
-- **Session Management**: Support for user-specific data isolation using `node_set`.
-- **Strands Integration**: Seamless integration with Strands' agent framework.
-- **Background Async Support**: Automatically handles Cognee's async operations in a background thread, making it easy to use with Strands tools.
+- **Smart Knowledge Storage**: Persist information into Cognee's knowledge graph.
+- **Semantic Search**: Retrieve relevant information with natural-language queries.
+- **Two memory tiers**: a permanent knowledge graph plus a fast session cache you persist with `improve()`.
+- **Strands Integration**: Drop-in tools for the Strands `Agent`.
+- **Background Async Support**: Cognee's async API is driven on a background thread, so the synchronous Strands tools just work.
+
+## Upgrading from 0.1.x ⚠️
+
+`0.2.0` moves the integration to **cognee v1.0** and replaces the old tool API. It's a breaking change with no compatibility shim — update your imports:
+
+| 0.1.x | 0.2.0 |
+|---|---|
+| `from cognee_integration_strands import add_tool, search_tool` | `from cognee_integration_strands import cognee_tools` |
+| `add_tool, search_tool = get_sessionized_cognee_tools("user-1")` | `tools = cognee_tools(session_id="user-1")` |
+| `Agent(tools=[add_tool, search_tool])` | `Agent(tools=cognee_tools())` |
+| `cognee>=0.4.0,<0.5.4` | `cognee>=1.0.0,<=1.1.2` |
+| `strands-agents>=1.18.0` | `strands-agents>=1.42.0` |
+
+In 0.1.x a `session_id` tagged data to isolate it per user. In 0.2.0 it routes writes to cognee's **session cache**; run `cognee.improve(session_ids=[session_id])` to persist a session into the permanent graph (see [Session Management](#session-management)).
 
 ## Installation
 
@@ -22,106 +36,110 @@ A powerful integration between Cognee and Strands that provides intelligent know
 pip install cognee-integration-strands
 ```
 
+The examples drive an OpenAI model, which needs the Strands `openai` extra:
+
+```bash
+pip install "strands-agents[openai]"
+```
+
 ## Quick Start
 
 ```python
 import os
-import asyncio
-from cognee_integration_strands import get_sessionized_cognee_tools
-from cognee_integration_strands.tools import run_cognee_task
+import cognee
+from cognee_integration_strands import cognee_tools, run_cognee_task
 from strands import Agent
 from strands.models.openai import OpenAIModel
-import cognee
 
-# Configure your OpenAI model
-model = OpenAIModel(
-    client_args={"api_key": os.getenv("LLM_API_KEY")},
-    model_id="gpt-4o",
-)
+run_cognee_task(cognee.forget(everything=True))  # optional: start fresh
 
-# Get sessionized tools for a specific user
-add_tool, search_tool = get_sessionized_cognee_tools("user-123")
+model = OpenAIModel(client_args={"api_key": os.getenv("LLM_API_KEY")}, model_id="gpt-4o")
+agent = Agent(model=model, tools=cognee_tools())
 
-# Create an agent with the tools
-agent = Agent(
-    model=model,
-    tools=[add_tool, search_tool]
-)
+# Store information
+agent("Remember that we signed a contract with Meditech Solutions for £1.2M.")
 
-# Use the agent to store information
-agent("Remember that we have signed a contract with Meditech Solutions for £1.2M.")
-
-# Use the agent to retrieve information
-response = agent("What is the value of the Meditech Solutions contract?")
-print(response)
+# Retrieve it (even from a fresh agent — memory is persistent)
+print(agent("What is the value of the Meditech Solutions contract?"))
 ```
 
 ## Available Tools
 
-### `get_sessionized_cognee_tools(session_id: Optional[str] = None)`
-
-Returns cognee tools with optional user-specific sessionization.
-
-**Parameters:**
-
-- `session_id` (optional): User identifier for data isolation. If not provided, a random session ID is auto-generated.
-
-**Returns:** `(add_tool, search_tool)` - A list of tools for storing and searching data.
-
-**Usage:**
-
 ```python
-# With sessionization (recommended for multi-user apps)
-add_tool, search_tool = get_sessionized_cognee_tools("user-123")
+from cognee_integration_strands import cognee_tools
 
-# Without explicit session (auto-generates session ID)
-add_tool, search_tool = get_sessionized_cognee_tools()
+# cognee_tools() -> [remember, recall]
+#   remember: store information   (cognee.remember)
+#   recall:   retrieve information (cognee.recall)
 ```
 
-### Individual Tools
-
-- **`add_tool`**: Stores information in the knowledge base. It handles the asynchronous addition and cognition process in the background.
-- **`search_tool`**: Searches and retrieves previously stored information from the knowledge base.
+Pass `cognee_tools(session_id=...)` to route writes through cognee's session cache.
 
 ## Session Management
 
-`cognee-integration-strands` supports user-specific sessions to isolate data between different users or contexts. This is achieved by passing a `session_id` to `get_sessionized_cognee_tools`, which ensures that all data stored via `add_tool` is associated with that specific user ID (via Cognee's `node_set` feature).
+A `session_id` selects cognee's **session cache** tier instead of the permanent graph:
+
+- **No `session_id`** → `remember` writes straight to the permanent knowledge graph.
+- **With `session_id`** → `remember` writes to that session's cache (cheap, no graph extraction); recall is session-aware.
+- **`cognee.improve(session_ids=[session_id])`** → promotes a session's cached entries into the permanent graph.
+
+So an agent can capture context cheaply during a session, then persist the useful parts later. Pass `remember_kwargs={"self_improvement": False}` to keep cached writes out of the graph until you call `improve()` (otherwise cognee bridges them in the background).
 
 ```python
-# User 1 Session
-user1_tools = get_sessionized_cognee_tools("user-123")
-agent1 = Agent(model=model, tools=user1_tools)
+import cognee
+from cognee_integration_strands import cognee_tools, run_cognee_task
+from strands import Agent
 
-# User 2 Session
-user2_tools = get_sessionized_cognee_tools("user-456")
-agent2 = Agent(model=model, tools=user2_tools)
+SESSION_ID = "mission-briefing"
+
+session_agent = Agent(
+    model=model,
+    tools=cognee_tools(session_id=SESSION_ID, remember_kwargs={"self_improvement": False}),
+)
+# ... use session_agent to remember/recall during the session ...
+
+# Persist everything captured in the session into the permanent graph:
+run_cognee_task(cognee.improve(session_ids=[SESSION_ID]))
 ```
+
+For a full runnable walkthrough, see [`examples/session_example.py`](examples/session_example.py).
+
+## Tool Reference
+
+### `cognee_tools(session_id=None, *, remember_kwargs=None, recall_kwargs=None)`
+
+Builds the `remember` and `recall` Strands tools. Pass the result to `Agent(tools=...)`. With `session_id`, writes go to cognee's session cache (persist later with `cognee.improve(session_ids=[session_id])`); without it, writes go straight to the permanent graph. `remember_kwargs` / `recall_kwargs` bind extra cognee params per call (e.g. `remember_kwargs={"self_improvement": False}`).
+
+**Returns:** `[remember, recall]`
+
+### `remember(data, **kwargs)` / `recall(query_text, **kwargs)`
+
+Synchronous passthroughs to `cognee.remember` / `cognee.recall` for direct use outside an agent (they run cognee on a background loop). No defaults are imposed — pass any cognee parameter. `recall` returns cognee's native `RecallResponse` list; flatten it with `render_results(...)`.
+
+### `run_cognee_task(coro, timeout=300)`
+
+Runs any async cognee coroutine (e.g. `cognee.improve(...)`, `cognee.forget(...)`) from synchronous code and returns the result.
 
 ## Configuration
 
-Copy the `.env.template` file to `.env` and fill out the required API keys:
+Copy `.env.template` to `.env` and set your key:
 
 ```bash
 cp .env.template .env
 ```
 
-Then edit the `.env` file and set your API keys:
-
 ```env
 LLM_API_KEY=your-openai-api-key-here
-# Add other configuration as needed
 ```
 
 ## Examples
 
-Check out the `examples/` directory for more comprehensive usage examples:
-
-- `examples/example.py`: Demonstrates setting up Cognee, ingesting data, and using an agent to query that data.
-- `examples/session_example.py`: Demonstrates advanced session handling with visualization.
+- `examples/example.py`: store contracts with an agent, then recall them from a fresh agent.
+- `examples/session_example.py`: the session cache → `improve()` → permanent graph flow, with before/after graph visualizations.
 
 ## Requirements
 
 - Python 3.10+
-- Cognee
-- Strands Agents
+- Cognee `>=1.0.0,<=1.1.2`
+- Strands Agents `>=1.42.0` (`strands-agents[openai]` for the examples)
 - OpenAI API key (for the example model)

@@ -102,10 +102,10 @@ integrations:
     registry: pypi
     package_name: "cognee-integration-strands"
     cognee_dependency: sdk
-    current_version: "0.1.1"
+    current_version: "0.2.0"
     migration_status: done
     source_repo: https://github.com/topoteretes/cognee-integration-strands
-    notes: "Strands agent tools – add, search, session management"
+    notes: "Strands agent tools – remember, recall, session management (cognee v1.0)"
   - slug: claude-agent-sdk
     name: "Cognee Integration for Claude Agent SDK"
     owner: cognee
@@ -162,10 +162,10 @@ integrations:
     registry: pypi
     package_name: "cognee-integration-strands"
     cognee_dependency: sdk
-    current_version: "0.1.1"
-    migration_status: pending
+    current_version: "0.2.0"
+    migration_status: done
     source_repo: https://github.com/topoteretes/cognee-integration-strands
-    notes: "Strands agent tools – add, search, session management"
+    notes: "Strands agent tools – remember, recall, session management (cognee v1.0)"
 
   - slug: vercel-ai-sdk
     name: "Cognee for Vercel AI SDK"

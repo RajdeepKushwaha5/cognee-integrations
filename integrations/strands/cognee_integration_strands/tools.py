@@ -1,9 +1,7 @@
 import asyncio
-import concurrent.futures
-import functools
 import logging
 import threading
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import cognee
 from strands import tool
@@ -12,7 +10,8 @@ from . import bootstrap  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-# Create a dedicated background event loop
+# Strands tools are synchronous but cognee is async, so run cognee coroutines on
+# a dedicated background event loop and block for the result.
 _loop = None
 _loop_thread = None
 
@@ -30,143 +29,100 @@ def _start_background_loop():
         _loop_thread.start()
 
 
-def run_cognee_task(coro, timeout=120):
-    """Run coroutine safely on a background event loop."""
+def run_cognee_task(coro, timeout=300):
+    """Run an async cognee coroutine from sync code and return its result."""
     _start_background_loop()
-    fut = asyncio.run_coroutine_threadsafe(coro, _loop)
-    try:
-        # Add timeout and better error handling
-        result = fut.result(timeout=timeout)  # 120 second timeout
-        logger.info("Async operation completed successfully")
-        return result
-    except concurrent.futures.TimeoutError:
-        logger.error("Async operation timed out after 120 seconds")
-        raise Exception("Operation timed out - check for deadlocks")
-    except Exception as e:
-        logger.error(f"Async operation failed with exception: {e}")
-        import traceback
-
-        traceback.print_exc()
-        raise
+    return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=timeout)
 
 
-_add_lock = asyncio.Lock()
-_add_queue = asyncio.Queue()
+# cognee isn't safe to initialise concurrently, so serialise writes.
+_write_lock = asyncio.Lock()
 
 
-async def _enqueue_add(*args, **kwargs):
-    global _add_lock
-    if _add_lock.locked():
-        await _add_queue.put((args, kwargs))
-        return
-    async with _add_lock:
-        await _add_queue.put((args, kwargs))
-        while True:
-            try:
-                next_args, next_kwargs = await asyncio.wait_for(_add_queue.get(), timeout=2)
-                _add_queue.task_done()
-            except asyncio.TimeoutError:
-                break
-            await cognee.add(*next_args, **next_kwargs)
-        await cognee.cognify()
+def _render(item: Any) -> Optional[str]:
+    # cognee.recall returns a discriminated union keyed on `source`; pull the
+    # text field each source type carries.
+    source = getattr(item, "source", None)
+    if source is None:
+        return str(item) if item is not None else None
+    if source == "graph":
+        return item.text
+    if source == "session":
+        return item.answer or item.question or None
+    if source == "graph_context":
+        return item.content
+    if source == "trace":
+        return getattr(item, "memory_context", None)
+    return str(item)
 
 
-@tool
-def add_tool(data: str, node_set: Optional[List[str]] = None):
+def render_results(results: Any) -> List[str]:
+    """Flatten a ``cognee.recall`` result list into plain strings."""
+    return [text for item in (results or []) if (text := _render(item))]
+
+
+async def _remember_async(data: Any, **kwargs: Any) -> Any:
+    async with _write_lock:
+        return await cognee.remember(data, **kwargs)
+
+
+def remember(data: Any, **kwargs: Any) -> Any:
+    """Sync passthrough to ``cognee.remember`` (kwargs forwarded; no defaults added)."""
+    return run_cognee_task(_remember_async(data, **kwargs))
+
+
+def recall(query_text: str, **kwargs: Any) -> Any:
+    """Sync passthrough to ``cognee.recall``; returns cognee's RecallResponse list.
+
+    Use :func:`render_results` to flatten the result into plain strings.
     """
-    Store information in the knowledge base for later retrieval.
+    return run_cognee_task(cognee.recall(query_text, **kwargs))
 
-    Use this tool whenever you need to remember, store, or save information
-    that the user provides. This is essential for building up a knowledge base
-    that can be searched later. Always use this tool when the user says things
-    like "remember", "store", "save", or gives you information to keep track of.
 
-    Args:
-        data (str): The text or information you want to store and remember.
-        node_set (Optional[List[str]]): Additional node set identifiers.
+def cognee_tools(
+    session_id: Optional[str] = None,
+    *,
+    remember_kwargs: Optional[dict] = None,
+    recall_kwargs: Optional[dict] = None,
+) -> list:
+    """Build the ``remember`` and ``recall`` Strands tools.
 
-    Returns:
-        str: A confirmation message indicating that the item was added.
+    Pass the result to ``Agent(tools=cognee_tools())``. With ``session_id``,
+    writes go to cognee's session cache (reads stay session-aware) until
+    ``cognee.improve(session_ids=[session_id])`` persists them to the permanent
+    graph; without it, writes go straight to the graph. ``remember_kwargs`` /
+    ``recall_kwargs`` bind extra cognee params per call (e.g.
+    ``remember_kwargs={"self_improvement": False}`` keeps session writes
+    cache-only).
     """
-    logger.info(f"Adding data to cognee: {data}")
+    base = {"session_id": session_id} if session_id is not None else {}
+    rem_kwargs = {**base, **(remember_kwargs or {})}
+    rec_kwargs = {**base, **(recall_kwargs or {})}
 
-    # Use lock to prevent race conditions during database initialization
-    run_cognee_task(_enqueue_add(data, node_set=node_set))
-    return "Item added to cognee and processed"
+    @tool
+    def remember(data: str) -> str:
+        """Store information in memory for later retrieval.
 
+        Use whenever the user gives you information to remember, store, or save.
 
-@tool
-def search_tool(query_text: str):
-    """
-    Search and retrieve previously stored information from the knowledge base.
+        Args:
+            data: The text or information to store.
+        """
+        logger.info(f"remember tool (session_id={session_id}): {data}")
+        run_cognee_task(_remember_async(data, **rem_kwargs))
+        return "Item stored in cognee memory"
 
-    Use this tool to find and recall information that was previously stored.
-    Always use this tool when you need to answer questions about information
-    that should be in the knowledge base, or when the user asks questions
-    about previously discussed topics.
+    @tool
+    def recall(query_text: str) -> str:
+        """Search and retrieve previously stored information from memory.
 
-    Args:
-        query_text (str): What you're looking for, written as a natural language search query.
+        Use to answer questions about anything previously stored.
 
-    Returns:
-        list: A list of search results matching the query.
-    """
-    logger.info(f"Searching cognee for: {query_text}")
-    run_cognee_task(_add_queue.join())
-    result = run_cognee_task(cognee.search(query_text, top_k=100))
-    logger.info(f"Search results: {result}")
-    return result
+        Args:
+            query_text: A natural-language search query.
+        """
+        logger.info(f"recall tool (session_id={session_id}): {query_text}")
+        results = run_cognee_task(cognee.recall(query_text, **rec_kwargs))
+        return f"Result: {render_results(results)}"
 
-
-def sessionised_tool(user_id: str):
-    """
-    Decorator factory that creates a decorator to add user_id to tool calls.
-
-    Args:
-        user_id (str): The user session ID to bind to the tool
-
-    Returns:
-        A decorator that modifies tools to use the specific user's session
-    """
-
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            logger.info(f"Using tool {func.__name__} with user_id: {user_id}")
-            # Inject user_id for tools that support it
-            if func.__name__ == "add_tool":
-                kwargs["node_set"] = [user_id]
-            return func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def get_sessionized_cognee_tools(session_id: Optional[str] = None) -> list:
-    """
-    Returns a list of cognee tools sessionized for a specific user.
-
-    Args:
-        session_id (str): The session ID to bind to all tools
-
-    Returns:
-        list: List of sessionized cognee tools
-    """
-    if session_id is None:
-        import uuid
-
-        uid = str(uuid.uuid4())
-        session_id = f"cognee-test-user-{uid}"
-
-    session_decorator = sessionised_tool(session_id)
-
-    sessionized_add_tool = tool(session_decorator(add_tool._tool_func))
-    sessionized_search_tool = tool(session_decorator(search_tool._tool_func))
-
-    logger.info(f"Initialized session with session_id = {session_id}")
-
-    return [
-        sessionized_add_tool,
-        sessionized_search_tool,
-    ]
+    return [remember, recall]
