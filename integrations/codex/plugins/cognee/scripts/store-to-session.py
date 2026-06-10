@@ -33,7 +33,9 @@ from _plugin_common import (
     quiet_hook_output,
     remember_entry_via_http,
     resolve_runtime_mode,
+    resolve_session_key_from_payload,
     resolve_user,
+    server_ready_hint,
     set_session_key,
     touch_activity,
 )
@@ -158,6 +160,19 @@ async def _store_tool_call(payload: dict) -> None:
     config = load_config()
     runtime = resolve_runtime_mode()
     use_http = runtime["mode"] == "http"
+    if not server_ready_hint(runtime.get("service_url", "")):
+        # Server still warming: don't block the tool call and don't lose the
+        # trace. Mirror it into the local bridge shadow; the session->graph
+        # sync drains it once the server is ready.
+        trace_text = (
+            f"{tool_name} [{status}]\n"
+            f"Params: {json.dumps(params, ensure_ascii=False)}\n"
+            f"Return: {return_value}"
+        )
+        append_http_bridge_entry(dataset, session_id, trace=trace_text)
+        bump_save_counter(session_id, "trace")
+        hook_log("store_buffered_warming", {"hook": "tool", "tool": tool_name})
+        return
     if not use_http:
         await ensure_cognee_ready(config)
 
@@ -247,6 +262,20 @@ async def _store_assistant_stop(payload: dict) -> None:
     config = load_config()
     runtime = resolve_runtime_mode()
     use_http = runtime["mode"] == "http"
+    if not server_ready_hint(runtime.get("service_url", "")):
+        # Server still warming: buffer the prompt+answer into the local bridge
+        # shadow instead of dropping it; the session->graph sync drains it once
+        # the server is ready.
+        pending = pop_pending_prompt(session_id, turn_id=str(payload.get("turn_id") or ""))
+        append_http_bridge_entry(
+            dataset,
+            session_id,
+            question=pending.get("prompt", ""),
+            answer=msg,
+        )
+        bump_save_counter(session_id, "answer")
+        hook_log("store_buffered_warming", {"hook": "stop"})
+        return
     if not use_http:
         await ensure_cognee_ready(config)
 
@@ -317,9 +346,10 @@ def main():
         hook_log("invalid_payload_json")
         return
 
-    payload_session_id = str(payload.get("session_id", "") or "").strip()
-    if payload_session_id:
-        set_session_key(payload_session_id)
+    session_key_candidate, session_key_source = resolve_session_key_from_payload(payload)
+    if session_key_candidate:
+        set_session_key(session_key_candidate)
+    hook_log("store_session_key", {"source": session_key_source, "value": session_key_candidate})
     if not get_session_key():
         hook_log("store_missing_session_key")
         return

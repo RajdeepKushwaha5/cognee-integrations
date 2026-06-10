@@ -35,6 +35,7 @@ from _plugin_common import (
     resolve_runtime_mode,
     resolve_session_key_from_payload,
     resolve_user,
+    server_ready_hint,
     set_session_key,
     touch_activity,
 )
@@ -170,6 +171,19 @@ async def _store_tool_call(payload: dict) -> None:
             "api_key_present": runtime.get("api_key_present", False),
         },
     )
+    if not server_ready_hint(runtime.get("service_url", "")):
+        # Server still warming: don't block the tool call and don't lose the
+        # trace. Mirror it into the local bridge shadow; the session->graph
+        # sync drains it once the server is ready.
+        trace_text = (
+            f"{tool_name} [{status}]\n"
+            f"Params: {json.dumps(params, ensure_ascii=False)}\n"
+            f"Return: {return_value}"
+        )
+        append_http_bridge_entry(dataset, session_id, trace=trace_text)
+        bump_save_counter(session_id, "trace")
+        hook_log("store_buffered_warming", {"hook": "tool", "tool": tool_name})
+        return
     if not use_http:
         await ensure_cognee_ready(config)
 
@@ -270,6 +284,20 @@ async def _store_assistant_stop(payload: dict) -> None:
             "api_key_present": runtime.get("api_key_present", False),
         },
     )
+    if not server_ready_hint(runtime.get("service_url", "")):
+        # Server still warming: buffer the prompt+answer into the local bridge
+        # shadow instead of dropping it; the session->graph sync drains it once
+        # the server is ready.
+        pending = pop_pending_prompt(session_id, turn_id=str(payload.get("turn_id") or ""))
+        append_http_bridge_entry(
+            dataset,
+            session_id,
+            question=pending.get("prompt", ""),
+            answer=msg,
+        )
+        bump_save_counter(session_id, "answer")
+        hook_log("store_buffered_warming", {"hook": "stop"})
+        return
     if not use_http:
         await ensure_cognee_ready(config)
 
