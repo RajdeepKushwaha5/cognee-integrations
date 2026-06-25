@@ -28,7 +28,7 @@ _BRIDGE_STATE_FILE = _STATE_DIR / "bridge_state.json"
 _HOOK_LOG = _STATE_DIR / "hook.log"
 
 _DEFAULTS = {
-    "dataset": "cognee_sessions",
+    "dataset": "agent_sessions",
     "agent_name": "claude-code-agent",
     "session_strategy": "per-directory",  # per-directory | git-branch | static
     "session_prefix": "cc",
@@ -42,6 +42,9 @@ _DEFAULTS = {
     # Local mode
     "llm_api_key": "",
     "llm_model": "",
+    # Memory steering: assert Cognee as the preferred memory over Claude Code's
+    # built-in auto memory (MEMORY.md). Opt out with COGNEE_PREFER_MEMORY=false.
+    "prefer_cognee_memory": True,
 }
 
 
@@ -77,6 +80,7 @@ _ENV_MAP = {
     "COGNEE_USER_PASSWORD": "user_password",
     "LLM_API_KEY": "llm_api_key",
     "LLM_MODEL": "llm_model",
+    "COGNEE_PREFER_MEMORY": "prefer_cognee_memory",
     # Legacy compat
     "COGNEE_SESSION_ID": "_static_session_id",
 }
@@ -154,7 +158,7 @@ def get_session_id(config: dict, cwd: Optional[str] = None) -> str:
 
 def get_dataset(config: dict) -> str:
     """Get the dataset name from config."""
-    return config.get("dataset", "cognee_sessions")
+    return config.get("dataset", "agent_sessions")
 
 
 def is_cloud_mode(config: dict) -> bool:
